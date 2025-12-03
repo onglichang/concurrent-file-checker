@@ -2,11 +2,14 @@ package main
 
 import (
 	"crypto/sha256"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
+	"time"
 )
 
 type FileResult struct {
@@ -16,28 +19,45 @@ type FileResult struct {
 }
 
 func main() {
-	root := "./testdata"
+	// ---- Timer start ----
+	start := time.Now()
+
+	// ---- CLI FLAGS ----
+	pathFlag := flag.String("path", "./testdata", "Root directory to scan")
+	workersFlag := flag.Int("workers", 4, "Number of worker goroutines")
+	help := flag.Bool("help", false, "Show help message")
+
+	flag.Parse()
+
+	if *help {
+		fmt.Println("Concurrent File Integrity Checker")
+		fmt.Println("")
+		fmt.Println("Usage:")
+		fmt.Println("  filechecker --path <directory> --workers <num>")
+		fmt.Println("")
+		fmt.Println("Options:")
+		flag.PrintDefaults()
+		return
+	}
 
 	jobs := make(chan string)
 	results := make(chan FileResult)
 
 	var wg sync.WaitGroup
 
-	// Start workers
-	workerCount := 4
-	for i := 0; i < workerCount; i++ {
+	/// ---- WORKER POOL ----
+	for i := 0; i < *workersFlag; i++ {
 		wg.Add(1)
 		go worker(jobs, results, &wg)
 	}
 
 	// Walk files and send jobs
 	go func() {
-		filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		filepath.Walk(*pathFlag, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
 			if !info.IsDir() {
-				fmt.Println("Hashing:", path)
 				jobs <- path
 			}
 			return nil
@@ -45,20 +65,34 @@ func main() {
 		close(jobs)
 	}()
 
-	// Close results channel after workers finish
+	// ---- CLOSE RESULTS AFTER WORKERS FINISH ----
 	go func() {
 		wg.Wait()
 		close(results)
 	}()
 
-	// Consume results
-	for res := range results {
-		if res.Err != nil {
-			fmt.Printf("ERR: %s (%v)\n", res.Path, res.Err)
+	// ---- COLLECT RESULTS ----
+	var all []FileResult
+	for r := range results {
+		all = append(all, r)
+	}
+
+	// ---- SORT OUTPUT ----
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Path < all[j].Path
+	})
+
+	// ---- PRINT ----
+	for _, r := range all {
+		if r.Err != nil {
+			fmt.Printf("ERR: %s (%v)\n", r.Path, r.Err)
 			continue
 		}
-		fmt.Printf("%s  %s\n", res.Hash, res.Path)
+		fmt.Printf("%s  %s\n", r.Hash, r.Path)
 	}
+
+	// ---- Timer end ----
+	fmt.Printf("\nCompleted in %v\n", time.Since(start))
 }
 
 func worker(jobs <-chan string, results chan<- FileResult, wg *sync.WaitGroup) {
